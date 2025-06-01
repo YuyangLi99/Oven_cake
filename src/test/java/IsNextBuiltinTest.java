@@ -87,19 +87,19 @@ public class IsNextBuiltinTest {
         // OnMode: Can only start at low temp, must end at high temp, prevents overheat
         Resource odeOn  = model.createResource()
                 .addProperty(RDF.type, ODE)
-                .addLiteral(derivative, "5")                    // Heating rate +5°/hour
-                .addLiteral(startCond, "x <= 180")              // Can only start at <=175°
-                .addLiteral(endCond,   "x >= 180")              // Must end when reaching 185°
+                .addLiteral(derivative, "(2620 - 10*x) / 4000")
+                .addLiteral(startCond, "x <= 180")              // Can only start at <=180°
+                .addLiteral(endCond,   "x >= 180")              // Must end when reaching 180°
                 .addLiteral(domainConst, "x <= 200")            // Absolute safety limit
                 .addProperty(evolvingVar, xProp);
 
         // OffMode: Forced start at high temp, cool down to low temp
         Resource odeOff = model.createResource()
                 .addProperty(RDF.type, ODE)
-                .addLiteral(derivative, "-5")                   // Cooling rate -3°/hour
-                .addLiteral(startCond, "x >= 180")              // Forced start at >=185°
-                .addLiteral(endCond,   "x <= 180")              // Cool down to 175°
-                .addLiteral(domainConst, "x <= 200")             // Not below room temperature
+                .addLiteral(derivative, "(-10*x + 200) / 4000")
+                .addLiteral(startCond, "x >= 180")              // Forced start at >=180°
+                .addLiteral(endCond,   "x <= 180")              // Cool down to 180°
+                .addLiteral(domainConst, "x <= 200")             // absolute safety limit
                 .addProperty(evolvingVar, xProp);
 
         OvenOnMode.addProperty(hasODE, odeOn);

@@ -76,7 +76,7 @@ pre:OvenOnMode  rdf:type  pre:ModeRecord;
         pre:hasDevice  pre:Oven;
         pre:hasMode    pre:OnMode;
         pre:hasODE     [ rdf:type                       pre:ODE;
-                         pre:derivative                 "5";
+                         pre:derivative                 "(2620 - 10*x) / 4000";
                          pre:endingCondition            "x >= 180";
                          pre:evolutionDomainConstraint  "x <= 200";
                          pre:evolvingVariable           pre:x;
@@ -100,7 +100,7 @@ pre:OvenOffMode  rdf:type  pre:ModeRecord;
         pre:hasDevice  pre:Oven;
         pre:hasMode    pre:OffMode;
         pre:hasODE     [ rdf:type                       pre:ODE;
-                         pre:derivative                 "-5";
+                         pre:derivative                 "(-10*x + 200) / 4000";
                          pre:endingCondition            "x <= 180";
                          pre:evolutionDomainConstraint  "x <= 200";
                          pre:evolvingVariable           pre:x;
@@ -121,12 +121,6 @@ pre:s12  rdf:type     pre:State;
         <http://example.org/states#next>
                 pre:s21 .
 
-pre:s22  rdf:type     pre:State;
-        pre:hasOven   pre:Oven;
-        pre:hasShape  pre:s22Shape;
-        <http://example.org/states#next>
-                pre:s11 .
-
 pre:s11OvenShape  rdf:type  sh:NodeShape;
         sh:property  [ sh:hasValue  pre:OffMode;
                        sh:maxCount  "1"^^xsd:long;
@@ -138,6 +132,12 @@ pre:s11OvenShape  rdf:type  sh:NodeShape;
                        sh:minCount      "1"^^xsd:long;
                        sh:path          pre:x
                      ] .
+
+pre:s22  rdf:type     pre:State;
+        pre:hasOven   pre:Oven;
+        pre:hasShape  pre:s22Shape;
+        <http://example.org/states#next>
+                pre:s11 .
 
 pre:Oven  rdf:type                    <http://schema.org/Product>;
         <http://schema.org/capacity>  "50L";

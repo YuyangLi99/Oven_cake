@@ -198,15 +198,18 @@ public class IsNextBuiltin extends BaseBuiltin {
             }
             return res;
         }
+
         List<String> buildOdeExpressions() {
             List<String> res = new ArrayList<>();
             for (ModeRow m : modes) {
-                try { Double.parseDouble(m.derivative);
+                if (m.derivative != null && !m.derivative.trim().isEmpty()) {
                     res.add("x' = " + m.derivative);
-                } catch (Exception e) {}
+                }
             }
             return res;
         }
+
+
         List<String> buildDomainExpressions() {
             List<String> res = new ArrayList<>();
             for (ModeRow m : modes) res.add(m.evolutionDomainConstraint);
