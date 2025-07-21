@@ -8,303 +8,212 @@ import org.apache.jena.reasoner.rulesys.RuleContext;
 import org.apache.jena.reasoner.rulesys.builtins.BaseBuiltin;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
- * A custom Builtin "mode_change(?s1, ?s2)" that implements:
- *  (1) s1 != s2
- *  (2) s1, s2 share the same numeric variable constraints (like x>=55, x<=65)
- *  (3) Then check two KeymaeraX formulas:
- *       a) (s1Constraints) -> (mode1.startingCondition)
- *          -- KeymaeraX "!false" => interpret success
- *       b) (mode1.endingCondition) <-> (mode2.startingCondition)
- *          -- KeymaeraX "true" => interpret success
- *      If both pass => we conclude "mode_change(s1, s2) = true".
+ * Jena custom builtin:  mode_change(?s1, ?s2)
+ * -------------------------------------------------------------
+ * Rule (simplified):
+ *   1) s1 ≠ s2
+ *   2) Numeric constraints (h1 / h2) of the two State instances are identical.
+ *   3) ∃ mode ∈ Modes(s2)  with
+ *        • mode NOT in Modes(s1), and
+ *        •   (StateConstraints) -> (mode.startingCondition)    proved "true" by KeYmaera X
+ *      ⇒  mode_change(s1 , s2) holds.
  *
- * Now with extra debug prints to observe:
- *   - The constraints for each state
- *   - The modes (startCond, endCond)
- *   - The KeymaeraX formulas and their results
+ * Implementation details
+ *   • Two SPARQL queries fetch constraints and mode info (unchanged).
+ *   • KeYmaera variables declared as  Real h1, h2.
+ *   • endingCondition is ignored.
+ *   • Extensive step‑numbered tracing via System.out; toggle with DEBUG.
  */
 public class ModeChange extends BaseBuiltin {
 
+    /* ---------------- global debug switch ---------------- */
+    private static final boolean DEBUG = true;
+    private static long STEP = 0;
+    private static void trace(String msg) {
+        if (DEBUG) System.out.println(String.format("[MC|%03d] %s", ++STEP, msg));
+    }
+
+    /* ---------------- engine setup ----------------------- */
     private final Dataset dataset;
+    public ModeChange(Dataset ds) { this.dataset = ds; }
 
-    public ModeChange(Dataset ds) {
-        this.dataset = ds;
-    }
+    @Override public String getName()      { return "mode_change"; }
+    @Override public int    getArgLength() { return 2; }
 
-    @Override
-    public String getName() {
-        return "mode_change";
-    }
-
-    @Override
-    public int getArgLength() {
-        return 2;
-    }
-
+    /* ================================================================
+     * builtin core
+     * ================================================================ */
     @Override
     public boolean bodyCall(Node[] args, int length, RuleContext context) {
-        if(args[0].isURI() && args[1].isURI()) {
-            String s1Uri = args[0].getURI();
-            String s2Uri = args[1].getURI();
 
-            // 1) exclude self-loop
-            if(s1Uri.equals(s2Uri)) {
-                System.out.println("[ModeChangeBuiltin] Skip self-loop => false");
-                return false;
+        STEP = 0;                                         // reset counter per call
+        if (args.length < 2 || !args[0].isURI() || !args[1].isURI()) {
+            trace("Illegal arguments – expect two URIs."); return false;
+        }
+        String s1Uri = args[0].getURI(), s2Uri = args[1].getURI();
+        trace("Invoke on   s1=" + s1Uri + "   s2=" + s2Uri);
+        if (s1Uri.equals(s2Uri)) { trace("Self‑loop – abort."); return false; }
+
+        /* ---- constraint sets ---- */
+        List<String> s1Cons = gatherShapeConstraints(s1Uri);
+        List<String> s2Cons = gatherShapeConstraints(s2Uri);
+        trace("Constraints s1 = " + s1Cons);
+        trace("Constraints s2 = " + s2Cons);
+        if (!sameConstraintSet(s1Cons, s2Cons)) {
+            trace("Constraint sets differ – abort."); return false;
+        }
+
+        /* ---- mode sets ---- */
+        List<ModeCondRow> s1Modes = gatherModeConditions(s1Uri);
+        List<ModeCondRow> s2Modes = gatherModeConditions(s2Uri);
+        trace("Modes of s1 → " + s1Modes);
+        trace("Modes of s2 → " + s2Modes);
+
+        Set<String> s1ModeURIs = s1Modes.stream()
+                .map(m -> m.modeUri)
+                .collect(Collectors.toSet());
+
+        /* ---- single‑implication search ---- */
+        for (ModeCondRow m2 : s2Modes) {
+            if (s1ModeURIs.contains(m2.modeUri)) {
+                trace("Mode already active in s1 – skip " + localName(m2.modeUri));
+                continue;
+            }
+            if (m2.startingCondition == null || m2.startingCondition.isEmpty()) {
+                trace("Mode2 has empty SC – skip");
+                continue;
             }
 
-            // 2) gather shape constraints => must match
-            List<String> s1Constraints = gatherShapeConstraints(s1Uri);
-            List<String> s2Constraints = gatherShapeConstraints(s2Uri);
-
-            System.out.println("[ModeChangeBuiltin] s1 = " + s1Uri + " => constraints : " + s1Constraints);
-            System.out.println("[ModeChangeBuiltin] s2 = " + s2Uri + " => constraints : " + s2Constraints);
-
-            if(! sameConstraintSet(s1Constraints, s2Constraints)) {
-                System.out.println("[ModeChangeBuiltin] s1, s2 constraints differ => false");
-                return false;
-            }
-
-            // 3) gather s1, s2 modes
-            List<ModeCondRow> s1Modes = gatherModeConditions(s1Uri);
-            List<ModeCondRow> s2Modes = gatherModeConditions(s2Uri);
-
-            System.out.println("[ModeChangeBuiltin] s1 => modes: ");
-            for(ModeCondRow m : s1Modes) {
-                System.out.println("  modeUri=" + m.modeUri + ", start=" + m.startingCondition + ", end=" + m.endingCondition);
-            }
-            System.out.println("[ModeChangeBuiltin] s2 => modes: ");
-            for(ModeCondRow m : s2Modes) {
-                System.out.println("  modeUri=" + m.modeUri + ", start=" + m.startingCondition + ", end=" + m.endingCondition);
-            }
-
-            // 4) for each mode1 in s1
-            for(ModeCondRow m1 : s1Modes) {
-                // build formula #1 => (s1Constraints) -> (m1.startingCondition)
-                String formula1 = buildImplicationFormula(s1Constraints, m1.startingCondition);
-                System.out.println("[ModeChangeBuiltin] Checking formula1:\n" + formula1);
-
-                String result1 = Prove_helper.prove(formula1);
-                System.out.println("  => KeymaeraX result1 = " + result1 + " (interpret 'false'=success for ->)");
-
-                // interpret "false" as success for implication
-                if(! "false".equals(result1)) {
-                    // means didn't succeed => skip this mode1
-                    System.out.println("  => Not success => skip mode1=" + m1.modeUri);
-                    continue;
-                }
-
-                // next => check (m1.endingCondition) <-> (some mode2.startingCondition)
-                if(m1.endingCondition==null || m1.endingCondition.isEmpty()) {
-                    // no ending => skip
-                    System.out.println("  => mode1 has empty endingCondition => skip");
-                    continue;
-                }
-
-                for(ModeCondRow m2 : s2Modes) {
-                    // skip if same modeUri => we want mode changed
-                    if(m1.modeUri.equals(m2.modeUri)) {
-                        continue;
-                    }
-                    if(m2.startingCondition==null || m2.startingCondition.isEmpty()) {
-                        continue;
-                    }
-
-                    String formula2 = buildEquivalenceFormula(m1.endingCondition, m2.startingCondition);
-                    System.out.println("[ModeChangeBuiltin] Checking formula2:\n" + formula2);
-
-                    String result2 = Prove_helper.prove(formula2);
-                    System.out.println("  => KeymaeraX result2 = " + result2 + " (interpret 'true'=success for <->)");
-
-                    // interpret "true" as success for <->
-                    if("true".equals(result2)) {
-                        // success => return true => builtin => produce (s1 :ModeChange s2)
-                        System.out.println("[ModeChangeBuiltin] => success => (s1, s2) = (" + s1Uri + ", " + s2Uri + ")");
-                        return true;
-                    }
-                    System.out.println("  => Not success => try next mode2");
-                }
+            String proof = buildImplicationFormula(s1Cons, m2.startingCondition);
+            trace("Proof (new mode " + localName(m2.modeUri) + ")\n" + proof);
+            String res = Prove_helper.prove(proof);
+            trace("Result = " + res);
+            if ("true".equals(res)) {                       // KeYmaera closed goal
+                trace("SUCCESS: mode_change(" + s1Uri + ", " + s2Uri + ")");
+                return true;
             }
         }
+        trace("No new mode satisfies the implication.");
         return false;
     }
 
-    // -------------------------------------------------------------------
-    // Query => gather shape constraints => e.g. [ "x>=180", "x<=180" ]
-    // Updated to use the new SPARQL query provided
-    // -------------------------------------------------------------------
+    /* ================================================================
+     * SPARQL 1: numeric constraints (unchanged)
+     * ================================================================ */
     private List<String> gatherShapeConstraints(String stateUri) {
         String sparql =
-                "PREFIX sh: <http://www.w3.org/ns/shacl#>\n"+
-                        "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\n"+
-                        "PREFIX pre: <http://anonymous.example.org#>\n"+
-                        "\n"+
-                        "SELECT DISTINCT ?State ?StateShape ?StateDeviceShape ?variable ?MAX ?MIN\n"+
-                        "WHERE {\n"+
-                        "  BIND(<"+ stateUri +"> as ?State)\n"+
-                        "  ?State rdf:type pre:State ;\n"+
-                        "         pre:hasShape ?StateShape .\n"+
-                        "  ?StateShape rdf:type sh:NodeShape ;\n"+
-                        "              sh:property [\n"+
-                        "                sh:node ?StateDeviceShape\n"+
-                        "              ] .\n"+
-                        "  ?StateDeviceShape rdf:type sh:NodeShape ;\n"+
-                        "                    sh:property ?subProp .\n"+
-                        "  ?subProp sh:path ?variable .\n"+
-                        "  FILTER (?variable IN (pre:x))\n"+
-                        "  OPTIONAL { ?subProp sh:maxInclusive ?MAX }\n"+
-                        "  OPTIONAL { ?subProp sh:minInclusive ?MIN }\n"+
-                        "}\n"+
-                        "ORDER BY ?State ?StateShape ?StateDeviceShape ?variable";
+                "PREFIX sh:  <http://www.w3.org/ns/shacl#>\n" +
+                        "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\n" +
+                        "PREFIX pre: <http://anonymous.example.org#>\n" +
+                        "SELECT DISTINCT ?variable ?operator ?value WHERE {\n" +
+                        "  BIND(<" + stateUri + "> AS ?State)\n" +
+                        "  ?State rdf:type pre:State ; pre:hasShape ?Shape .\n" +
+                        "  ?Shape sh:property [ sh:node ?DevShape ] .\n" +
+                        "  ?DevShape sh:property ?Prop .\n" +
+                        "  ?Prop sh:path ?variable .\n" +
+                        "  FILTER (?variable IN (pre:h1, pre:h2))\n" +
+                        "  { ?Prop sh:hasValue       ?v  BIND(\"=\"  AS ?operator) } UNION\n" +
+                        "  { ?Prop sh:minExclusive   ?v  BIND(\">\"  AS ?operator) } UNION\n" +
+                        "  { ?Prop sh:maxExclusive   ?v  BIND(\"<\"  AS ?operator) } UNION\n" +
+                        "  { ?Prop sh:minInclusive   ?v  BIND(\">=\" AS ?operator) } UNION\n" +
+                        "  { ?Prop sh:maxInclusive   ?v  BIND(\"<=\" AS ?operator) }\n" +
+                        "  BIND(STR(?v) AS ?value)\n" +
+                        "} ORDER BY ?variable ?operator";
 
-        List<String> constraints = new ArrayList<>();
+        List<String> out = new ArrayList<>();
         Model m = dataset.getDefaultModel();
-        try(QueryExecution qe = QueryExecutionFactory.create(sparql, m)) {
+        try (QueryExecution qe = QueryExecutionFactory.create(sparql, m)) {
             ResultSet rs = qe.execSelect();
-            while(rs.hasNext()) {
+            while (rs.hasNext()) {
                 QuerySolution sol = rs.nextSolution();
-                String varUri = sol.getResource("variable").getURI();
-                String varName = varUri.endsWith("#x")? "x" : "P";
-
-                String maxVal = (sol.contains("MAX"))? lexicalOf(sol.get("MAX")) : null;
-                String minVal = (sol.contains("MIN"))? lexicalOf(sol.get("MIN")) : null;
-
-                if(minVal != null && !minVal.isEmpty()) {
-                    constraints.add(varName + ">=" + minVal);
-                }
-                if(maxVal != null && !maxVal.isEmpty()) {
-                    constraints.add(varName + "<=" + maxVal);
-                }
+                String var = localName(sol.getResource("variable").getURI());
+                String op  = sol.getLiteral("operator").getString();
+                String val = sol.getLiteral("value").getString();
+                out.add(var + op + val);
+                trace("  ↳ constraint " + var + op + val);
             }
         }
-        return constraints;
+        return out;
     }
 
-    // -------------------------------------------------------------------
-    // Query => gather each mode => "modeUri", "startingCondition", "endingCondition"
-    // Updated to use the new SPARQL query provided (focusing on Oven devices)
-    // -------------------------------------------------------------------
+    /* ================================================================
+     * SPARQL 2: mode / SC extraction (EC ignored)
+     * ================================================================ */
     private List<ModeCondRow> gatherModeConditions(String stateUri) {
         String sparql =
-                "PREFIX sh: <http://www.w3.org/ns/shacl#>\n"+
-                        "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\n"+
-                        "PREFIX pre: <http://anonymous.example.org#>\n"+
-                        "\n"+
-                        "SELECT DISTINCT ?state ?StateShape ?deviceMode ?endingCondition ?startingCondition ?deviceModeRecord\n"+
-                        "WHERE {\n"+
-                        "  BIND(<"+ stateUri +"> as ?state)\n"+
-                        "  {\n"+
-                        "    ?state pre:hasOven ?Device .\n"+
-                        "    ?StateShape sh:property [\n"+
-                        "      sh:path pre:hasOven ;\n"+
-                        "      sh:node ?deviceShape\n"+
-                        "    ] .\n"+
-                        "  }\n"+
-                        "  ?state rdf:type pre:State ;\n"+
-                        "         pre:hasShape ?StateShape .\n"+
-                        "  ?StateShape a sh:NodeShape .\n"+
-                        "  ?deviceShape a sh:NodeShape ;\n"+
-                        "               sh:property [ sh:path pre:mode ; sh:hasValue ?deviceMode ] .\n"+
-                        "  \n"+
-                        "  ?deviceModeRecord a pre:ModeRecord ;\n"+
-                        "                    pre:hasDevice ?Device ;\n"+
-                        "                    pre:hasMode ?deviceMode ;\n"+
-                        "                    pre:hasODE [\n"+
-                        "                      rdf:type pre:ODE;\n"+
-                        "                      pre:endingCondition ?endingCondition;\n"+
-                        "                      pre:startingCondition ?startingCondition\n"+
-                        "                    ] .\n"+
-                        "}\n"+
-                        "ORDER BY ?state ?Device";
+                "PREFIX sh:  <http://www.w3.org/ns/shacl#>\n" +
+                        "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\n" +
+                        "PREFIX pre: <http://anonymous.example.org#>\n" +
+                        "SELECT DISTINCT ?deviceMode ?startingCondition ?record WHERE {\n" +
+                        "  BIND(<" + stateUri + "> AS ?state)\n" +
+                        "  ?state (pre:hasTank1|pre:hasTank2) ?Device .\n" +
+                        "  ?state pre:hasShape ?Shape .\n" +
+                        "  ?Shape sh:property ?Outer .\n" +
+                        "  ?Outer sh:path ?p ; sh:node ?DevShape .\n" +
+                        "  ?state ?p ?Device .\n" +
+                        "  ?DevShape sh:property [ sh:path pre:mode ; sh:hasValue ?deviceMode ] .\n" +
+                        "  ?record a pre:ModeRecord ; pre:hasDevice ?Device ; pre:hasMode ?deviceMode ; pre:hasODE ?ode .\n" +
+                        "  ?ode pre:startingCondition ?startingCondition .\n" +
+                        "}";
 
-        List<ModeCondRow> result = new ArrayList<>();
+        Map<String,ModeCondRow> map = new LinkedHashMap<>();
         Model m = dataset.getDefaultModel();
-        try(QueryExecution qe = QueryExecutionFactory.create(sparql, m)) {
+        try (QueryExecution qe = QueryExecutionFactory.create(sparql, m)) {
             ResultSet rs = qe.execSelect();
-            while(rs.hasNext()) {
+            while (rs.hasNext()) {
                 QuerySolution sol = rs.nextSolution();
-                String modeUri   = sol.getResource("deviceMode").getURI();
-                String sc        = lexicalOf(sol.get("startingCondition"));
-                String ec        = lexicalOf(sol.get("endingCondition"));
-                String rec       = sol.contains("deviceModeRecord")? sol.getResource("deviceModeRecord").getURI() : null;
-
-                result.add(new ModeCondRow(modeUri, sc, ec, rec));
+                String mu = sol.getResource("deviceMode").getURI();
+                String sc = lexicalOf(sol.get("startingCondition"));
+                String rec = sol.getResource("record").getURI();
+                map.putIfAbsent(mu, new ModeCondRow(mu, sc, rec));
+                trace("  ↳ mode " + localName(mu) + "  SC=\"" + sc + "\"");
             }
         }
-        return result;
+        return new ArrayList<>(map.values());
     }
 
-    // -------------------------------------------------------------------
-    // helper:  strip "^^xsd:long" etc => only keep lexical
-    // -------------------------------------------------------------------
-    private String lexicalOf(RDFNode node) {
-        if(node == null) return "";
-        if(node.isLiteral()) {
-            return node.asLiteral().getLexicalForm();
-        }
+    /* ================================================================
+     * KeYmaera X script factory
+     * ================================================================ */
+    private String buildImplicationFormula(List<String> ante, String cons) {
+        String ant = ante.isEmpty() ? "true" : String.join(" & ", ante);
+        return "ArchiveEntry \"" + UUID.randomUUID() + "\"\n" +
+                "ProgramVariables\n" +
+                "  Real h1, h2;\n" +
+                "End.\nProblem\n" +
+                "(" + ant + ") -> (" + cons + ")\n" +
+                "End.\nEnd.\n";
+    }
+
+    /* ================================================================
+     * helpers
+     * ================================================================ */
+    private static String lexicalOf(RDFNode node) {
+        if (node == null) return "";
+        if (node.isLiteral()) return node.asLiteral().getLexicalForm();
         return node.toString();
     }
-
-    // -------------------------------------------------------------------
-    // compare sets ignoring order => must be identical
-    // e.g. c1=[x>=180], c2=[x>=180]
-    // -------------------------------------------------------------------
-    private boolean sameConstraintSet(List<String> c1, List<String> c2) {
-        if(c1.size()!=c2.size()) return false;
-        Set<String> set1 = new HashSet<>(c1);
-        Set<String> set2 = new HashSet<>(c2);
-        return set1.equals(set2);
+    private static String localName(String uri) {
+        int i = uri.lastIndexOf('#');
+        return (i >= 0 && i + 1 < uri.length()) ? uri.substring(i + 1) : uri;
+    }
+    private static boolean sameConstraintSet(List<String> c1, List<String> c2) {
+        return new HashSet<>(c1).equals(new HashSet<>(c2));
     }
 
-    // -------------------------------------------------------------------
-    // build formula #1 => (s1Constraints) -> (mode1.startingCondition)
-    // KeymaeraX: interpret "false" as success
-    // Updated to use only x variable
-    // -------------------------------------------------------------------
-    private String buildImplicationFormula(List<String> ante, String cons) {
-        String antecedent = String.join(" & ", ante);
-        StringBuilder sb = new StringBuilder();
-        sb.append("ArchiveEntry \"").append(UUID.randomUUID()).append("\"\n");
-        sb.append("ProgramVariables\n");
-        sb.append("  Real x;\n");
-        sb.append("End.\nProblem\n");
-        sb.append("(").append(antecedent).append(") -> (").append(cons).append(")\n");
-        sb.append("End.\nEnd.\n");
-        return sb.toString();
-    }
-
-    // -------------------------------------------------------------------
-    // build formula #2 => (mode1.endingCondition) <-> (mode2.startingCondition)
-    // KeymaeraX: interpret "true" as success
-    // Updated to use only x variable
-    // -------------------------------------------------------------------
-    private String buildEquivalenceFormula(String left, String right) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("ArchiveEntry \"").append(UUID.randomUUID()).append("\"\n");
-        sb.append("ProgramVariables\n");
-        sb.append("  Real x;\n");
-        sb.append("End.\nProblem\n");
-        sb.append("(").append(left).append(") <-> (").append(right).append(")\n");
-        sb.append("End.\nEnd.\n");
-        return sb.toString();
-    }
-
-    // -------------------------------------------------------------------
-    // container for a single "mode" => sc, ec
-    // -------------------------------------------------------------------
+    /* --- DTO -------------------------------------------------------- */
     static class ModeCondRow {
-        String modeUri;
-        String startingCondition;
-        String endingCondition;
-        String modeRecordUri;
-
-        ModeCondRow(String mu, String sc, String ec, String rec) {
-            this.modeUri   = mu;
-            this.startingCondition = sc;
-            this.endingCondition  = ec;
-            this.modeRecordUri    = rec;
+        final String modeUri;
+        final String startingCondition;
+        final String recordUri;
+        ModeCondRow(String mu, String sc, String ru) {
+            this.modeUri = mu; this.startingCondition = sc; this.recordUri = ru;
+        }
+        @Override public String toString() {
+            return '{' + localName(modeUri) + ", SC=\"" + startingCondition + "\"}";
         }
     }
 }
